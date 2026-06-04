@@ -1,30 +1,31 @@
 """
-Fix notebook paths so they work in VS Code regardless of
-which directory the kernel starts from.
+Fix notebook path-setup cells to robustly find the project root
+regardless of where VS Code starts the kernel from.
 
 Run from project root: python scripts/fix_paths.py
 """
 import json
 import os
 
-SETUP_PATCH = "\n".join([
-    "# Path setup: works whether VS Code launches from project root or notebooks/",
+# Robust path-setup: walks UP from cwd until it finds data/raw/
+NEW_SETUP = "\n".join([
     "import os",
     "from pathlib import Path",
-    "_cwd = Path(os.getcwd())",
-    "PROJECT_ROOT = _cwd.parent if _cwd.name == 'notebooks' else _cwd",
+    "",
+    "# Find project root by searching upward for the data/raw folder",
+    "# Works regardless of where VS Code starts the kernel (project root, notebooks/, .venv, etc.)",
+    "def _find_root():",
+    "    p = Path(os.getcwd()).resolve()",
+    "    for candidate in [p] + list(p.parents):",
+    "        if (candidate / 'data' / 'raw').exists():",
+    "            return candidate",
+    "    raise FileNotFoundError('Could not find project root. Make sure data/raw/ exists.')",
+    "",
+    "PROJECT_ROOT = _find_root()",
     "os.chdir(PROJECT_ROOT)",
-    'print(f"Working directory set to: {PROJECT_ROOT}")',
+    'print(f"Project root: {PROJECT_ROOT}")',
+    'print(f"data/raw exists: {(PROJECT_ROOT / \'data\' / \'raw\').exists()}")',
 ])
-
-PATCH_CELL = {
-    "cell_type": "code",
-    "execution_count": None,
-    "metadata": {},
-    "outputs": [],
-    "source": SETUP_PATCH,
-    "id": "path-setup-00"
-}
 
 NB_FILES = [
     "notebooks/01_eda_revenue_segmentation.ipynb",
@@ -32,43 +33,39 @@ NB_FILES = [
     "notebooks/03_host_strategy_location.ipynb",
 ]
 
-def fix_paths(source):
-    """Replace relative paths that assume cwd=notebooks/ with project-root-relative paths."""
-    if isinstance(source, list):
-        return [fix_paths(s) for s in source]
-    return (
-        source
-        .replace("../data/raw/", "data/raw/")
-        .replace("../outputs/figures", "outputs/figures")
-    )
-
 for nb_file in NB_FILES:
     with open(nb_file, encoding="utf-8") as f:
         nb = json.load(f)
 
-    # Fix all paths in code cells
     for cell in nb["cells"]:
         if cell["cell_type"] == "code":
-            cell["source"] = fix_paths(cell["source"])
-
-    # Check if path-setup cell already inserted (avoid duplicates)
-    already_patched = any(
-        "PROJECT_ROOT" in "".join(c["source"]) if isinstance(c["source"], list) else "PROJECT_ROOT" in c["source"]
-        for c in nb["cells"] if c["cell_type"] == "code"
-    )
-
-    if not already_patched:
-        # Insert path-setup cell before the first code cell
+            src = cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
+            # Replace the old path-setup cell with the new robust version
+            if "PROJECT_ROOT" in src and "_find_root" not in src:
+                cell["source"] = NEW_SETUP
+                cell["outputs"] = []
+                cell["execution_count"] = None
+                print(f"  Updated path-setup cell in {nb_file}")
+                break
+    else:
+        # No path-setup cell found at all — insert before first code cell
         first_code_idx = next(
             i for i, c in enumerate(nb["cells"]) if c["cell_type"] == "code"
         )
-        patch = dict(PATCH_CELL)
-        patch["id"] = "path-setup-" + str(first_code_idx)
-        nb["cells"].insert(first_code_idx, patch)
+        nb["cells"].insert(first_code_idx, {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": NEW_SETUP,
+            "id": "path-setup-robust"
+        })
+        print(f"  Inserted path-setup cell in {nb_file}")
 
     with open(nb_file, "w", encoding="utf-8") as f:
         json.dump(nb, f, indent=1, ensure_ascii=False)
 
-    print(f"Patched: {nb_file}")
-
-print("\nAll notebooks updated. Re-run them in VS Code.")
+print("\nDone. Now in VS Code:")
+print("1. Click the kernel (top-right) -> Select Another Kernel -> Jupyter Kernel")
+print("2. Choose: StayPriceML (.venv)")
+print("3. Ctrl+Shift+P -> Notebook: Restart Kernel and Run All Cells")
